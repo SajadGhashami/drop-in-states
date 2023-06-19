@@ -1,0 +1,869 @@
+---
+title: "Drop"
+author: "Sajad Ghashami"
+date: "2023-01-16"
+output: 
+   html_document:
+     code_folding: hide
+     theme: cerulean
+---
+
+```{=html}
+<style type="text/css">
+.main-container {
+  max-width: 1400px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = 'center')
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+library(tidyverse)
+library(DBI)
+library(rmarkdown)
+library(ggpubr)
+library(data.table)
+library(knitr)
+library(plotly)
+library(rsconnect)
+library(reactable)
+library(moments)
+library(downloadthis)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+con <- DBI::dbConnect(odbc::odbc(),
+                      #Snowflake
+                      #SnowflakeDSIIDriver
+                      Driver       = "SnowflakeDSIIDriver",
+                      Server       = "ed87949.us-east-1.snowflakecomputing.com",
+                      UID          = rstudioapi::askForPassword("Database user"),
+                      PWD          = rstudioapi::askForPassword("Database password"),
+                      Database     = "EDW",
+                      Warehouse    = "shiny_app",
+                      Schema       = "dim"
+                      #,
+                      #authenticator = "externalbrowser"
+                      )
+mywh <- DBI::dbSendQuery(con, 'use role shiny_app_role')
+mywh <- DBI::dbSendQuery(con, 'use warehouse shiny_app')
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+base_table <- DBI::dbGetQuery(con,
+             "
+SELECT
+    (EXTRACT(YEAR FROM calendar.DATE )::integer) AS hierarchy_year,
+    school_accounts.GRADE_LEVEL  AS grade_level,
+    SCHOOLS.state,
+        (CASE WHEN CASE WHEN license_combinations.is_paid = 1
+    THEN TRUE
+    ELSE FALSE END  THEN 'Yes' ELSE 'No' END) AS is_paid,
+    product_combinations.PRODUCT_COMBINATION  AS product_combination,
+        (CASE WHEN product_combinations.IS_ELA = 1  THEN 'Yes' ELSE 'No' END) AS is_ela,
+        (CASE WHEN product_combinations.IS_ESSENTIALS = 1  THEN 'Yes' ELSE 'No' END) AS is_essentials,
+        (CASE WHEN product_combinations.IS_SCIENCE = 1  THEN 'Yes' ELSE 'No' END) AS is_science,
+        (CASE WHEN product_combinations.IS_SOCIAL_STUDIES = 1  THEN 'Yes' ELSE 'No' END) AS is_social_studies,
+        (CASE WHEN product_combinations.IS_COLLECTIONS = 1  THEN 'Yes' ELSE 'No' END) AS is_collections,
+        (CASE WHEN product_combinations.IS_CUSTOM_UNITS = 1  THEN 'Yes' ELSE 'No' END) AS is_custom_units,
+        (CASE WHEN product_combinations.PRODUCT_COMBINATION_KEY = -1  THEN 'Yes' ELSE 'No' END) AS is_not_licensed,
+    COUNT(DISTINCT CASE WHEN ( product_actions.ACTION_NAME  ) = 'Active Users' AND ( product_actions.IS_STUDENT  ) THEN product_actions.user_id ELSE NULL END ) AS unique_active_students,
+    COUNT(DISTINCT CASE WHEN ( product_actions.ACTION_NAME  ) = 'Active Users' AND ( product_actions.IS_TEACHER  ) THEN product_actions.user_id ELSE NULL END ) AS unique_active_teachers
+FROM FACT.PRODUCT_ACTIONS  AS product_actions
+INNER JOIN DIM.PRODUCT_USER_ACTION_EVENTS
+     AS product_user_action_events ON (product_actions.USER_ACTION_EVENTS_KEY) = (product_user_action_events.USER_ACTION_EVENTS_KEY)
+INNER JOIN DIM.LICENSE_COMBINATIONS
+     AS license_combinations ON (product_actions.LICENSE_COMBINATION_KEY) = license_combinations.license_combination_key
+INNER JOIN DIM.PRODUCT_COMBINATIONS
+     AS product_combinations ON (product_actions.PRODUCT_COMBINATION_KEY) = (product_combinations.PRODUCT_COMBINATION_KEY)
+INNER JOIN DIM.CALENDAR
+     AS calendar ON (product_actions.ACTION_DATE_KEY) = (calendar.DATE_KEY)
+INNER JOIN DIM.SCHOOLS
+     AS schools ON (product_actions.SCHOOL_KEY) = (schools.SCHOOL_KEY)
+LEFT JOIN DIM.ACCOUNTS
+     AS school_accounts ON (schools.SFDC_ACCOUNT_ID) = (school_accounts.ACCOUNT_ID)
+WHERE ((UPPER(( product_user_action_events.ACTION_NAME  )) = UPPER('Active Users'))) AND ((( calendar.DATE  ) >= (TO_DATE(TO_TIMESTAMP('2018-01-01'))) AND ( calendar.DATE  ) < (TO_DATE(TO_TIMESTAMP('2023-07-01'))))) AND ((UPPER(( schools.COUNTRY  )) = UPPER('US') OR UPPER(( schools.COUNTRY  )) = UPPER('United States')))
+GROUP BY
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12
+     ")
+
+```
+
+```{r test}
+base_table <- base_table %>% rename("Year"="HIERARCHY_YEAR")
+
+columnnames <- names(base_table)
+```
+
+# Summary table Comparison to the last year (AVG Over Grade Level)
+
+```{r}
+basic <- base_table %>%
+ 
+ group_by(Year, GRADE_LEVEL) %>%
+  summarise(total_students = sum(UNIQUE_ACTIVE_STUDENTS),
+            total_teachers = sum(UNIQUE_ACTIVE_TEACHERS)) %>%
+          ungroup() %>%
+          group_by(GRADE_LEVEL) %>%
+          mutate(student_diff=total_students-lag(total_students, order_by = Year, 1),
+                 perc_student_diff=
+                   round( 100*(student_diff/lag(total_students, order_by = Year, 1)),0),
+                 teacher_diff=total_teachers-lag(total_teachers, order_by = Year, 1),
+                 perc_teacher_diff=
+                   round( 100*(teacher_diff/lag(total_teachers, order_by = Year, 1)),0)
+                 )
+
+sub_base_year <- subset(basic, Year != 2023 ) %>%
+ 
+  group_by(Year) %>%
+  summarise(student_avg_diff=mean(student_diff),
+            student_perc_diff=mean(perc_student_diff),
+            teacher_avg_diff=mean(teacher_diff),
+            teacher_perc_diff=mean(perc_teacher_diff),
+            )
+
+sub_base_year_grade <- subset(basic, Year != 2023 ) %>%
+ 
+  group_by(Year, GRADE_LEVEL) %>%
+  summarise(student_avg_diff=mean(student_diff),
+            student_perc_diff=mean(perc_student_diff),
+            teacher_avg_diff=mean(teacher_diff),
+            teacher_perc_diff=mean(perc_teacher_diff),
+            )
+
+sub_base_year %>%
+  rename("AVG students Delta"='student_avg_diff',
+         "% AVG students Delta"='student_perc_diff',
+         "AVG teachers Delta"='teacher_avg_diff',
+         "% AVG teachers Delta"='teacher_perc_diff') %>%
+  kable()
+```
+
+# Summary plot Comparison to the last year (AVG Over Grade Level)
+
+```{r, out.width = "70%", out.height="70%"}
+sub_base_year %>%
+  pivot_longer(!Year,
+               names_to = c("student_vs_teacher", "value_vs_perc", "diff"),
+               names_pattern = "(.*)_(.*)_(.*)",
+  values_to = "value") %>%
+  select(-diff) %>%
+  filter(value_vs_perc=="perc") %>%
+ggplot(aes(Year, value, color=student_vs_teacher)) +
+  geom_line()+
+#  geom_point(color= "black")+
+  geom_text(aes(label= value), size=5) +
+  ggtitle("% AVG Delta in unique users over all the grade levels") +
+  ylab("AVG Delta %") + 
+  theme(legend.position="bottom")
+  
+```
+
+# Summary plot Comparison to the last year (For each Grade Level)
+
+```{r, out.width = "100%", out.height="70%"}
+grade_line_chart <- sub_base_year_grade %>%
+  pivot_longer(!c(Year, GRADE_LEVEL),
+               names_to = c("student_vs_teacher", "value_vs_perc", "diff"),
+               names_pattern = "(.*)_(.*)_(.*)",
+  values_to = "value") %>%
+  select(-diff) %>%
+  filter(value_vs_perc=="perc") %>%
+ggplot(aes(Year, value, color=  GRADE_LEVEL)) +
+  geom_line()+
+#  geom_point(color= "black")+
+  geom_text(aes(label= value), size=4)+
+  facet_wrap(~student_vs_teacher, ncol=2)+
+  ggtitle("% AVG Delta in unique users over all the grade levels") +
+  ylab("AVG Delta %") + 
+  theme(legend.position="bottom")
+
+ggplotly(grade_line_chart) %>% 
+  layout(legend = list(orientation = "h",
+                       x = 0.4,
+                       y = -0.2))
+```
+
+No abnormal trend could be identified among the known grade levels(compared to each other at the same school year). It means the values are similar to each other at each year and we can safely use the average of them demonstrated at the last graph.
+
+# Grade trend (Students)
+
+```{r, out.width = "70%", out.height="70%"}
+ggplot(basic, aes(Year, total_students, color=GRADE_LEVEL))+
+  geom_point()+
+  geom_line()+
+  geom_text(data=subset(basic, Year == 2022),
+            aes(Year,total_students,label=paste("21-22: ",student_diff," ", perc_student_diff, "%"), size=20),
+            nudge_y = 200000)+
+  ggtitle("Student tends") +
+  ylab("Total Students") + 
+  theme(legend.position="bottom")
+```
+
+NA is the only grade level that increased. If we remove that the average decline will be 3 percent more in **students**.
+
+# Grade trend (Teachers)
+
+```{r, out.width = "70%", out.height="70%"}
+ggplot(basic, aes(Year, total_teachers, color=GRADE_LEVEL)
+       )+
+  geom_point()+
+  geom_line()+
+  geom_text(data=subset(basic, Year == 2022),
+            aes(Year,
+                total_teachers,
+                label=paste(Year-1,"-",Year,teacher_diff," ", perc_teacher_diff, "%")),
+            nudge_y = 25000,
+            size=5)+
+  ggtitle("Teacher tends") +
+  ylab("Total Teachers") +
+  theme(legend.position="bottom")
+```
+
+NA grade level has similar rate compared to the others in **teachers**.
+
+### Paid vs Free Trend
+```{r, out.width = "70%", out.height="70%"}
+paid_vs_free_group <- base_table %>%
+  group_by(Year, IS_PAID) %>%
+  summarise(total_teachers = sum(UNIQUE_ACTIVE_TEACHERS),
+            total_students = sum(UNIQUE_ACTIVE_STUDENTS))
+
+paid_vs_free_group %>%
+  pivot_longer(!c(Year, IS_PAID),
+               names_to = c("Metric"),
+               values_to = "value") %>%
+  ggplot(aes(Year, value, color=IS_PAID)) +
+  geom_point()+
+  geom_line()+
+  
+  ggtitle("Teacher tends") +
+  ylab("Total Teachers") +
+  facet_wrap(~Metric, scales = "free") +
+  theme(legend.position="bottom")
+  
+```
+
+
+### Paid vs Free change compared to the last year(Teachers) (**Not** AVG over grade)
+
+```{r, out.width = "70%", out.height="70%"}
+ paid_vs_free_group %>%
+  select(Year, IS_PAID, total_teachers) %>%
+  filter(Year != 2023) %>%
+  ungroup() %>%
+  group_by(IS_PAID) %>%
+  mutate(diff_to_last_year = total_teachers- lag(total_teachers, order_by = Year, 1),
+         AVG_diff_to_last_year= round( 
+                   mean(diff_to_last_year[Year != 2022 & Year != 2018], na.rm = TRUE  )
+
+           ,0),
+         Change_to_AVG= diff_to_last_year- AVG_diff_to_last_year,
+         Perc_Change_to_AVG=round(100*
+                 (Change_to_AVG) / mean(total_teachers)
+                                   ,2)) %>%
+  filter(Year == 2022) %>%
+
+  arrange(Change_to_AVG) %>%
+  rename("IS PAID?"='IS_PAID',
+         "Total Teachers"='total_teachers',
+         "Delta Compared to last year"='diff_to_last_year',
+         "AVG Delta (other years)"='AVG_diff_to_last_year',
+         "Delta minus AVG Delta"='Change_to_AVG',
+         "Normalized Delta minus AVG delta"='Perc_Change_to_AVG') %>%
+  kable()
+  
+```
+
+### ELA change compared to the last year(Teachers) (**Not** AVG over grade)
+
+```{r, out.width = "50%", out.height="70%"}
+ base_table %>%
+  filter(Year != 2023) %>%
+  group_by(Year, IS_ELA) %>%
+  summarise(total_teachers=sum(UNIQUE_ACTIVE_TEACHERS)) %>%
+  ungroup() %>%
+  group_by(IS_ELA) %>%
+  mutate(diff_to_last_year = total_teachers- lag(total_teachers, order_by = Year, 1),
+         AVG_diff_to_last_year= round( 
+           mean(diff_to_last_year[Year != 2022 & Year != 2018],
+                na.rm = TRUE  )
+           ,0),
+         Change_to_AVG= diff_to_last_year- AVG_diff_to_last_year,
+         Perc_Change_to_AVG=round(100*
+                 (Change_to_AVG) / mean(total_teachers)
+                                   ,2)
+         ) %>%
+  filter(Year == 2022  ) %>%
+  arrange(Change_to_AVG) %>%
+  rename("IS ELA?"='IS_ELA',
+         "Total Teachers"='total_teachers',
+         "Delta Compared to last year"='diff_to_last_year',
+         "AVG Delta (other years)"='AVG_diff_to_last_year',
+         "Delta minus AVG Delta"='Change_to_AVG',
+         "Normalized Delta minus AVG delta"='Perc_Change_to_AVG') %>%
+  kable()
+  
+```
+
+
+
+```{r, out.width = "50%", out.height="70%"}
+ base_table %>%
+  filter(Year != 2023) %>%
+  group_by(Year, PRODUCT_COMBINATION) %>%
+  summarise(total_teachers=sum(UNIQUE_ACTIVE_TEACHERS)) %>%
+  ungroup() %>%
+  group_by(PRODUCT_COMBINATION) %>%
+  mutate(diff_to_last_year = total_teachers- lag(total_teachers, order_by = Year, 1),
+         AVG_diff_to_last_year= round( 
+           mean(diff_to_last_year[Year != 2022 & Year != 2018],
+                na.rm = TRUE  )
+           ,0),
+         Change_to_AVG= diff_to_last_year- AVG_diff_to_last_year,
+         Perc_Change_to_AVG=round(100*
+                 (Change_to_AVG) / mean(total_teachers)
+                                   ,2)
+         ) %>%
+  filter(Year == 2022  ) %>%
+  arrange(Change_to_AVG) %>%
+  rename("PRODUCT COMBINATION?"='PRODUCT_COMBINATION',
+         "Total Teachers"='total_teachers',
+         "Delta Compared to last year"='diff_to_last_year',
+         "AVG Delta (other years)"='AVG_diff_to_last_year',
+         "Delta minus AVG Delta"='Change_to_AVG',
+         "Normalized Delta minus AVG delta"='Perc_Change_to_AVG') %>%
+   reactable(
+            filterable = TRUE,
+            minRows = 5,
+            striped = TRUE,
+            highlight = TRUE,
+            bordered = TRUE,
+            defaultPageSize = 5,
+# To show the column names at the bottom of the table            
+            defaultColDef = colDef(
+    footer = function(values, name) {
+      htmltools::div(name, style = list(fontWeight = 600))
+    }))
+  
+```
+```{r, out.width = "100%", fig.height = 8}
+state_group <- base_table %>%
+  group_by(Year, STATE) %>%
+  summarise(total_teachers = sum(UNIQUE_ACTIVE_TEACHERS),
+            total_students = sum(UNIQUE_ACTIVE_STUDENTS))
+
+state_group_graph <- state_group %>%
+  pivot_longer(!c(Year, STATE),
+               names_to = c("Metric"),
+               values_to = "value") %>%
+  ggplot(aes(Year, value, color=STATE)) +
+  geom_point()+
+  geom_line()+
+  
+  ggtitle("Users tends by state") +
+  ylab("Total active users") +
+  facet_wrap(~Metric, scales = "free") +
+  theme(legend.position="bottom")
+  
+
+ggplotly(state_group_graph)  %>% 
+  layout(legend = list(orientation = "h",
+                       xanchor = "center",
+                       x = 0.4,
+                       y = -0.2))
+```
+
+
+```{r, out.width = "50%", out.height="70%"}
+ state_group %>%
+  select(-total_students) %>%
+  filter(Year != 2023) %>%
+  ungroup() %>%
+  group_by(STATE) %>%
+  mutate(diff_to_last_year = total_teachers- lag(total_teachers, order_by = Year, 1),
+         AVG_diff_to_last_year= round( 
+           mean(diff_to_last_year[Year != 2022 & Year != 2018],
+                na.rm = TRUE  )
+           ,0),
+         Change_to_AVG= diff_to_last_year- AVG_diff_to_last_year,
+         Perc_Change_to_AVG=round(100*
+                 (Change_to_AVG) / mean(total_teachers)
+                                   ,2)
+         ) %>%
+  filter(Year == 2022  ) %>%
+  arrange(Change_to_AVG) %>%
+  rename(
+         "Total Teachers"='total_teachers',
+         "Delta Compared to last year"='diff_to_last_year',
+         "AVG Delta (other years)"='AVG_diff_to_last_year',
+         "Delta minus AVG Delta"='Change_to_AVG',
+         "Normalized Delta minus AVG delta"='Perc_Change_to_AVG') %>%
+  reactable(
+            filterable = TRUE,
+            minRows = 5,
+            striped = TRUE,
+            highlight = TRUE,
+            bordered = TRUE,
+            defaultPageSize = 5,
+# To show the column names at the bottom of the table            
+            defaultColDef = colDef(
+    footer = function(values, name) {
+      htmltools::div(name, style = list(fontWeight = 600))
+    }))
+  
+```
+
+### (Teachers) Paid/free, Grade, subject combination change compared to the last year (**Not** AVG over grade)
+
+```{r, out.width = "70%", out.height="70%"}
+newcols <- columnnames %>% 
+     setdiff(., c("Year","UNIQUE_ACTIVE_STUDENTS","UNIQUE_ACTIVE_TEACHERS"))
+
+analysis_year <- "2022"
+
+remove_grade_level <- newcols %>%
+                      setdiff(.,c("GRADE_LEVEL"))
+a <-  base_table %>%
+  filter(Year != 2023) %>%
+  group_by_at( vars(Year,newcols)) %>%
+  summarise(total_teachers=sum(UNIQUE_ACTIVE_TEACHERS)) %>%
+  ungroup() %>%
+  group_by_at(vars(newcols)) %>%
+  mutate(diff_to_last_year =
+           total_teachers- lag(total_teachers, order_by = Year, 1),
+         AVG_diff_to_last_year=
+           round( 
+                   mean(diff_to_last_year[Year != analysis_year & Year != 2018],
+                        na.rm = TRUE  )
+                   ,0),
+         Change_to_AVG= diff_to_last_year- AVG_diff_to_last_year,
+         # -AVG_diff_to_last_year
+         # AVG_diff_to_last_year
+         Perc_Change_to_AVG= round(100*
+                                     (Change_to_AVG) / mean(total_teachers)
+                                   ,2)) %>%
+  filter(Year == analysis_year  ) %>%
+  arrange(Change_to_AVG) %>%
+   # to remove the record that did not exist in the last year (So increasing trend would not be very accurate)
+  drop_na(AVG_diff_to_last_year) %>%
+   relocate(	Year, GRADE_LEVEL, STATE, IS_PAID, PRODUCT_COMBINATION,
+          total_teachers,  diff_to_last_year, AVG_diff_to_last_year, Change_to_AVG, Perc_Change_to_AVG) %>%
+   ungroup() %>%
+   select(Year, GRADE_LEVEL, STATE, IS_PAID, PRODUCT_COMBINATION,
+          total_teachers,  diff_to_last_year, AVG_diff_to_last_year, Change_to_AVG, Perc_Change_to_AVG) %>%
+  rename('Grade Level'="GRADE_LEVEL",
+         'Is Paid'="IS_PAID",
+         'Product Combination'="PRODUCT_COMBINATION",
+         'Total Teachers'="total_teachers",
+         'Delta Compared to last year'="diff_to_last_year",
+         'AVG Delta (other years)'="AVG_diff_to_last_year",
+         'Delta minus AVG Delta'="Change_to_AVG",
+         'Normalized Delta minus AVG delta'="Perc_Change_to_AVG")
+
+# Background style to visually distinguish sticky columns
+sticky_style <- list(backgroundColor = "#f7f7f7")  
+
+
+ a %>%
+   filter(`AVG Delta (other years)` != 0) %>%
+   
+  reactable(
+            filterable = TRUE,
+            minRows = 5,
+            striped = TRUE,
+            highlight = TRUE,
+            bordered = TRUE,
+            defaultPageSize = 5,
+# To show the column names at the bottom of the table            
+            defaultColDef = colDef(
+    footer = function(values, name) {
+      htmltools::div(name, style = list(fontWeight = 600))
+    }),
+            columns = list(
+              Year = colDef(
+                sticky = "left",
+                style = sticky_style,
+                headerStyle = sticky_style,
+                width = 50
+                ),
+              STATE = colDef(
+                sticky = "left",
+                style = sticky_style,
+                headerStyle = sticky_style,
+                width = 50
+                ),
+              'Grade Level' = colDef(
+                sticky = "left",
+                style = sticky_style,
+                headerStyle = sticky_style
+                ),
+              'Is Paid' = colDef(
+                sticky = "left",
+                style = sticky_style,
+                headerStyle = sticky_style,
+                width = 50
+                ),
+              'Product Combination' = colDef(
+                sticky = "left",
+                style = sticky_style,
+                headerStyle = sticky_style,
+                width = 250
+                ), 
+              'Total Teachers' = colDef( format = colFormat(separators = TRUE)),
+              'Delta Compared to last year' = colDef( format = colFormat(separators = TRUE)),
+              'AVG Delta (other years)' = colDef( format = colFormat(separators = TRUE)),
+              'Delta minus AVG Delta' = colDef( format = colFormat(separators = TRUE)),
+              'Normalized Delta minus AVG delta' = colDef( format = colFormat(separators = TRUE))
+            )
+  )
+  
+  
+```
+
+### (Students) Paid/free, Grade, subject combination change compared to the last year (**Not** AVG over grade)
+
+```{r, out.width = "70%", out.height="70%"}
+
+b <-  base_table %>%
+  filter(Year != 2023) %>%
+  group_by_at( vars(Year,newcols)) %>%
+  summarise(total_students=sum(UNIQUE_ACTIVE_STUDENTS)) %>%
+  ungroup() %>%
+  group_by_at(vars(newcols)) %>%
+  mutate(diff_to_last_year =
+           total_students- lag(total_students, order_by = Year, 1),
+         AVG_diff_to_last_year=
+           round( 
+                   mean(diff_to_last_year[Year != analysis_year & Year != 2018],
+                        na.rm = TRUE  )
+                   ,0),
+         Change_to_AVG= diff_to_last_year- AVG_diff_to_last_year,
+         Perc_Change_to_AVG= round(100*
+                                     (Change_to_AVG) / mean(total_students)
+                                   ,2)) %>%
+  filter(Year == analysis_year  ) %>%
+  arrange(Change_to_AVG) %>%
+   # to remove the record that did not exist in the last year (So increasing trend would not be very accurate)
+  drop_na(AVG_diff_to_last_year) %>%
+   relocate(	Year, GRADE_LEVEL, STATE, IS_PAID, PRODUCT_COMBINATION,
+          total_students,  diff_to_last_year, AVG_diff_to_last_year, Change_to_AVG, Perc_Change_to_AVG) %>%
+   ungroup() %>%
+   select(Year, GRADE_LEVEL, STATE, IS_PAID, PRODUCT_COMBINATION,
+          total_students,  diff_to_last_year, AVG_diff_to_last_year, Change_to_AVG, Perc_Change_to_AVG) %>%
+  rename('Grade Level'="GRADE_LEVEL",
+         'Is Paid'="IS_PAID",
+         'Product Combination'="PRODUCT_COMBINATION",
+         'Total Students'="total_students",
+         'Delta Compared to last year'="diff_to_last_year",
+         'AVG Delta (other years)'="AVG_diff_to_last_year",
+         'Delta minus AVG Delta'="Change_to_AVG",
+         'Normalized Delta minus AVG delta'="Perc_Change_to_AVG")
+
+# Background style to visually distinguish sticky columns
+sticky_style <- list(backgroundColor = "#f7f7f7")  
+
+ b %>%
+   filter(`AVG Delta (other years)` != 0) %>%
+   reactable(
+            filterable = TRUE,
+            minRows = 5,
+            striped = TRUE,
+            highlight = TRUE,
+            bordered = TRUE,
+            defaultPageSize = 5,
+            defaultColDef = colDef(
+    footer = function(values, name) {
+      htmltools::div(name, style = list(fontWeight = 600))
+    }),
+            columns = list(
+              Year = colDef(
+                sticky = "left",
+                style = sticky_style,
+                headerStyle = sticky_style,
+                width = 50
+                ),
+              STATE = colDef(
+                sticky = "left",
+                style = sticky_style,
+                headerStyle = sticky_style,
+                width = 50
+                ),
+              'Grade Level' = colDef(
+                sticky = "left",
+                style = sticky_style,
+                headerStyle = sticky_style
+                ),
+              'Is Paid' = colDef(
+                sticky = "left",
+                style = sticky_style,
+                headerStyle = sticky_style,
+                width = 50
+                ),
+              'Product Combination' = colDef(
+                sticky = "left",
+                style = sticky_style,
+                headerStyle = sticky_style,
+                width = 250
+                ), 
+              'Total Students' = colDef( format = colFormat(separators = TRUE)),
+              'Delta Compared to last year' = colDef( format = colFormat(separators = TRUE)),
+              'AVG Delta (other years)' = colDef( format = colFormat(separators = TRUE)),
+              'Delta minus AVG Delta' = colDef( format = colFormat(separators = TRUE)),
+              'Normalized Delta minus AVG delta' = colDef( format = colFormat(separators = TRUE))
+            )
+  )
+  
+ 
+```
+
+```{r}
+c <- a %>% inner_join(b,
+                 by=c( "Year" ="Year", 
+                       "Grade Level"="Grade Level",
+                       "STATE"="STATE",
+                       "Is Paid"= "Is Paid",
+                       "Product Combination" = "Product Combination"),
+                 suffix = c(" Teacher", " Student"))
+```
+
+## Normalized metric summary table (Metric: Delta minus AVG delta)
+
+```{r, out.width = "30%", out.height="70%"}
+d <- c %>% pivot_longer(!c(Year, "Grade Level", "STATE", "Is Paid", "Product Combination"),
+                    names_to = "Metric",
+                    values_to = "Value") %>%
+  filter(Metric %in% c("Normalized Delta minus AVG delta Teacher",
+                       "Normalized Delta minus AVG delta Student")
+         )
+
+inf_nan_removed <- d %>% 
+  filter_if(~is.numeric(.), all_vars(!is.infinite(.))) %>%
+  filter(!is.nan(Value))
+
+inf_nan_removed %>%
+  group_by(Metric) %>%
+  summarise(AVG= paste0(round(mean(Value, na.rm = TRUE),0)," ", "%"),
+            'Standard Deviation' =  round(sd(Value),0) ) %>%
+  kable()
+```
+
+## Normalized metric Distribution Plot (Metric: Delta minus AVG delta)
+
+```{r, out.width = "70%", out.height="70%"}
+histodata <- inf_nan_removed %>%
+  filter(Metric %in% c(
+                       "Normalized Delta minus AVG delta Teacher",
+                       "Normalized Delta minus AVG delta Student")
+         ) 
+
+mu <- inf_nan_removed %>%
+  group_by(Metric) %>%
+  summarise(value.mean=mean(Value, na.rm = TRUE))
+
+
+ggplot(histodata, aes(x=Value)) + 
+  geom_histogram( aes(color=Metric,
+                      fill=Metric),
+                  position="identity", 
+                  alpha=0.5,
+                  bins = 500) +
+  facet_wrap( Metric ~ ., ncol = 1, scales="free_y" ) +
+  geom_vline(data=mu, aes(xintercept=value.mean), color="darkgrey",
+             linetype="dashed", label="Mean", size=1.5) +
+  geom_vline( aes(xintercept=0), color="black", size=1.5) +
+  geom_text(data=mu, aes(value.mean, 0, label = "Average", vjust = - 1)) +
+ 
+  xlim(-500, +500) +
+  theme(legend.position = "bottom")
+
+# ggplotly(histo_graph, tooltip = c("text"))
+  
+```
+
+## Normalized metric scatter plot- Student vs Teachers for teachers with delta less than - 100 (Metric: Delta minus AVG delta)
+
+```{r, out.width = "100%", fig.height = 10}
+scatter <- c %>%
+  filter(`Delta Compared to last year Teacher` < -100) %>%
+  ggplot( aes(`Normalized Delta minus AVG delta Teacher`, `Normalized Delta minus AVG delta Student` )) +
+  geom_point(alpha= 0.3,
+             size=2,
+             aes(color=`Is Paid`,
+                 text = paste(paste("Product Combination: ",
+                                    `Product Combination`),
+                              paste("Teacher delta to last year:",
+                                    `Delta Compared to last year Teacher`),
+                              paste("Student delta to last year: ",
+                                    `Delta Compared to last year Student`),
+                              paste("State: ", STATE),
+                                                  sep="\n"),
+                                     )) +
+  
+#  geom_smooth(method="lm", se = FALSE) +
+  facet_wrap(~`Grade Level`, ncol = 2, scales = "free") +
+  geom_vline( aes(xintercept=0), color="black", alpha = 0.5) +
+  geom_hline( aes(yintercept=0), color="black", alpha = 0.5) +
+  geom_smooth(aes(color=`Is Paid`), method = "lm", se=FALSE, alpha= 0.2) +
+  theme(legend.position = "bottom",
+          panel.spacing = unit(3, "lines"))
+
+ggplotly(scatter,
+         tooltip = c( "STATE",
+                      "Normalized Delta minus AVG delta Teacher",
+                      "Normalized Delta minus AVG delta Student",
+                      "text")) %>% 
+  layout(legend = list(orientation = "h",
+                       x = 0.4,
+                       y = -0.2))
+  
+```
+
+## Top decreasing cohort (Teachers compared to Students)
+
+```{r, out.width = "100%"}
+final <- c %>%
+   filter(`AVG Delta (other years) Teacher` != 0 & `AVG Delta (other years) Student` != 0) %>%
+#  filter(`Normalized Delta minus AVG delta Teacher` < `Normalized Delta minus AVG delta Student`) %>%
+  mutate(Normalized_Delta_Growth= (`Normalized Delta minus AVG delta Teacher`-`Normalized Delta minus AVG delta Student`)) %>%
+  select(Year,
+         'Grade Level',
+          STATE,
+         'Is Paid',
+         'Product Combination',
+         'Delta Compared to last year Teacher',
+         'AVG Delta (other years) Teacher',
+         'Delta Compared to last year Student',
+         'AVG Delta (other years) Student',
+         Normalized_Delta_Growth) %>%
+  
+  arrange(Normalized_Delta_Growth) %>%
+  rename('Normalized Delta Growth'="Normalized_Delta_Growth") 
+ # filter("Delta Compared to last year Teacher" < -1000) %>%
+  
+  final %>%
+   reactable(
+            filterable = TRUE,
+            minRows = 5,
+            striped = TRUE,
+            highlight = TRUE,
+            bordered = TRUE,
+            defaultPageSize = 5,
+            defaultColDef = colDef(
+    footer = function(values, name) {
+      htmltools::div(name, style = list(fontWeight = 600))
+    }),
+            columns = list(
+              Year = colDef(
+                sticky = "left",
+                style = sticky_style,
+                headerStyle = sticky_style,
+                width = 50
+                ),
+              STATE = colDef(
+                sticky = "left",
+                style = sticky_style,
+                headerStyle = sticky_style,
+                width = 50
+                ),
+              'Grade Level' = colDef(
+                sticky = "left",
+                style = sticky_style,
+                headerStyle = sticky_style
+                ),
+              'Is Paid' = colDef(
+                sticky = "left",
+                style = sticky_style,
+                headerStyle = sticky_style,
+                width = 50
+                ),
+              'Product Combination' = colDef(
+                sticky = "left",
+                style = sticky_style,
+                headerStyle = sticky_style,
+                width = 250
+                ), 
+              'Total Students' = colDef( format = colFormat(separators = TRUE)),
+              'Total Teachers' = colDef( format = colFormat(separators = TRUE)),
+              'Delta Compared to last year Teacher' = colDef( format = colFormat(separators = TRUE)),
+              'AVG Delta (other years) Teacher' = colDef( format = colFormat(separators = TRUE)),
+              'Delta minus AVG Delta Teacher' = colDef( format = colFormat(separators = TRUE)),
+              'Normalized Delta minus AVG delta Teacher' = colDef( format = colFormat(separators = TRUE)),
+              'Delta Compared to last year Student' = colDef( format = colFormat(separators = TRUE)),
+              'AVG Delta (other years) Student' = colDef( format = colFormat(separators = TRUE)),
+               'Delta minus AVG Delta Student' = colDef( format = colFormat(separators = TRUE)),
+              'Delta minus AVG Delta Student' = colDef( format = colFormat(separators = TRUE)),
+              'Normalized Delta minus AVG delta Student' = colDef( format = colFormat(separators = TRUE))
+            )
+  ) 
+
+```
+
+------------------------------------------------------------------------
+
+```{r}
+final %>%
+  download_this(
+     output_name = "final",
+    output_extension = ".xlsx",
+    button_label = "Download data as csv",
+    button_type = "default",
+    has_icon = FALSE,
+    icon = "fa fa-save",
+# self_contained=TRUE to remove the impact of this on ggplotly    
+    self_contained = TRUE
+  )
+
+```
+
+### Significant drops compared to students
+
+```{r}
+answer <- final %>%
+  filter(`Delta Compared to last year Teacher` < -1000 &  `Normalized Delta Growth` < -10) %>%
+  arrange(`Normalized Delta Growth`)
+answer  %>%
+   reactable(
+            filterable = TRUE,
+            minRows = 5,
+            striped = TRUE,
+            highlight = TRUE,
+            bordered = TRUE,
+            defaultPageSize = 5,
+            defaultColDef = colDef(
+    footer = function(values, name) {
+      htmltools::div(name, style = list(fontWeight = 600))
+    })
+   )
+```
+
+```{r}
+answer %>%
+  download_this(
+     output_name = "answer",
+    output_extension = ".xlsx",
+    button_label = "Download data as csv",
+    button_type = "default",
+    has_icon = FALSE,
+    icon = "fa fa-save",
+    # self_contained=TRUE to remove the impact of this on ggplotly  
+    self_contained = TRUE
+  )
+
+```
